@@ -69,6 +69,13 @@ resource "aap_job" "sample_wait_for_completion" {
   wait_for_completion_timeout_seconds = 120
 }
 
+resource "aap_job" "sample_with_destroy_template" {
+  job_template_id         = 7  # Template to run on creation
+  destroy_job_template_id = 8  # Template to run on destruction
+  inventory_id            = aap_inventory.my_inventory.id
+  extra_vars              = jsonencode({ "action" : "provision" })
+}
+
 output "job_foo" {
   value = aap_job.sample_foo
 }

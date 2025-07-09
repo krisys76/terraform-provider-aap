@@ -99,3 +99,21 @@ func (c *MockHTTPClient) Delete(path string) ([]byte, diag.Diagnostics) {
 	diags := ValidateResponse(deleteResponse, body, err, []int{http.StatusNoContent})
 	return body, diags
 }
+
+func (c *MockHTTPClient) GetWithStatus(path string) ([]byte, diag.Diagnostics, int) {
+	getResponse, body, err := c.doRequest("GET", path, nil)
+	diags := ValidateResponse(getResponse, body, err, []int{http.StatusOK, http.StatusNotFound})
+	status := http.StatusOK
+	if getResponse != nil {
+		status = getResponse.StatusCode
+	}
+	return body, diags, status
+}
+
+func (c *MockHTTPClient) setApiEndpoint() diag.Diagnostics {
+	return diag.Diagnostics{}
+}
+
+func (c *MockHTTPClient) getApiEndpoint() string {
+	return "/api/v2"
+}

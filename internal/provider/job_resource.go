@@ -48,6 +48,7 @@ type JobResourceModel struct {
 	Triggers                 types.Map                        `tfsdk:"triggers"`
 	WaitForCompletion        types.Bool                       `tfsdk:"wait_for_completion"`
 	WaitForCompletionTimeout types.Int64                      `tfsdk:"wait_for_completion_timeout_seconds"`
+	DestroyJobTemplateID     types.Int64                      `tfsdk:"destroy_job_template_id"`
 }
 
 // JobResource is the resource implementation.
@@ -189,6 +190,11 @@ func (r *JobResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *
 				Description: "Sets the maximum amount of seconds Terraform will wait before timing out the updates, " +
 					"and the job creation will fail. Default value of `120`",
 			},
+			"destroy_job_template_id": schema.Int64Attribute{
+				Optional: true,
+				Description: "Id of the job template to run when the resource is destroyed. " +
+					"This allows running cleanup tasks before the resource is removed from the state.",
+			},
 		},
 		MarkdownDescription: "Launches an AAP job.\n\n" +
 			"A job is launched only when the resource is first created or when the " +
@@ -196,7 +202,9 @@ func (r *JobResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *
 			"launch a new job based on any arbitrary value.\n\n" +
 			"This resource always creates a new job in AAP. A destroy will not " +
 			"delete a job created by this resource, it will only remove the resource " +
-			"from the state.\n\n" +
+			"from the state. However, if `destroy_job_template_id` is specified, " +
+			"it will launch that job template during resource destruction, allowing " +
+			"you to run cleanup tasks before the resource is removed.\n\n" +
 			"Moreover, you can set `wait_for_completion` to true, then Terraform will " +
 			"wait until this job is created and reaches any final state before continuing. " +
 			"This parameter works in both create and update operations.\n\n" +
@@ -314,9 +322,45 @@ func (r *JobResource) Update(ctx context.Context, req resource.UpdateRequest, re
 	}
 }
 
-// Delete is intentionally left blank Job and Workflow Job Resources.
-// Current guidance is to manage this inside AAP.
-func (r JobResource) Delete(_ context.Context, _ resource.DeleteRequest, _ *resource.DeleteResponse) {
+// Delete launches a destroy job template if configured, otherwise just removes the resource from state.
+func (r JobResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
+	var data JobResourceModel
+
+	// Read Terraform prior state data into the model
+	resp.Diagnostics.Append(req.State.Get(ctx, &data)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// If destroy_job_template_id is specified, launch that job template
+	if !data.DestroyJobTemplateID.IsNull() && data.DestroyJobTemplateID.ValueInt64() > 0 {
+		// Create a temporary model for the destroy job
+		destroyJobData := JobResourceModel{
+			TemplateID:               data.DestroyJobTemplateID,
+			InventoryID:              data.InventoryID,
+			ExtraVars:                data.ExtraVars,
+			WaitForCompletion:        data.WaitForCompletion,
+			WaitForCompletionTimeout: data.WaitForCompletionTimeout,
+		}
+
+		// Launch the destroy job
+		resp.Diagnostics.Append(r.LaunchJob(&destroyJobData)...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+
+		// If configured to wait for completion, wait for the destroy job to finish
+		if destroyJobData.WaitForCompletion.ValueBool() {
+			timeout := time.Duration(destroyJobData.WaitForCompletionTimeout.ValueInt64()) * time.Second
+			err := retry.RetryContext(ctx, timeout, retryUntilAAPJobReachesAnyFinalState(r.client, destroyJobData, resp.Diagnostics))
+			if err != nil {
+				resp.Diagnostics.Append(diag.NewErrorDiagnostic("error when waiting for destroy job to complete", err.Error()))
+			}
+			if resp.Diagnostics.HasError() {
+				return
+			}
+		}
+	}
 }
 
 // CreateRequestBody creates a JSON encoded request body from the job resource data
